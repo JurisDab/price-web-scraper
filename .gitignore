@@ -8,6 +8,7 @@ api/bin/
 __pycache__/
 *.pyc
 .venv/
+*.egg-info/
 
 # Node
 node_modules/

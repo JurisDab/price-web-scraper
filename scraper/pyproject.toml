@@ -1,0 +1,24 @@
+[project]
+name = "scraper"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.2",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+# Only for scripts/capture_requests.py, a one-off investigation tool for
+# finding the API a JS-rendered site's frontend calls. Not needed to run
+# any adapter — every adapter that got built ended up talking to plain
+# HTTP/JSON directly, with Playwright used only during investigation.
+investigate = ["playwright>=1.40"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
