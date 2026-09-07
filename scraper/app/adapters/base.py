@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import httpx
 
@@ -32,3 +33,16 @@ class SiteAdapter(ABC):
     def scrape(self, url: str) -> list[ProductDeal]:
         html = self.fetch(url)
         return self.parse(html, url)
+
+    def parse_product(self, html: str, page_url: str) -> Optional[ProductDeal]:
+        """Parse a single product's own page, for tracking one specific
+        product rather than a whole deals listing. Not every adapter fits
+        the simple fetch-then-parse shape this backs — Topocentras
+        overrides scrape_product() directly instead, since its flow needs
+        two requests (resolve the URL to a product ID, then fetch that
+        product's data), not one."""
+        raise NotImplementedError
+
+    def scrape_product(self, url: str) -> Optional[ProductDeal]:
+        html = self.fetch(url)
+        return self.parse_product(html, url)

@@ -65,6 +65,48 @@ class SkytechAdapter(SiteAdapter):
             image_url=None,  # not present on the listing rows
         )
 
+    def parse_product(self, html: str, page_url: str) -> ProductDeal | None:
+        """Parses a single product's own detail page. Different markup
+        entirely from the listing table — this page has no schema.org
+        microdata, so price/stock come from plain class-name selectors.
+        """
+        soup = BeautifulSoup(html, "lxml")
+
+        title_el = soup.select_one("div.product-name h1")
+        price_block = soup.select_one("div.product-info-price div.kaina")
+        if title_el is None or price_block is None:
+            return None
+
+        current_price_el = price_block.select_one("span.num span")
+        if current_price_el is None:
+            return None
+        price = parse_price_text(current_price_el.get_text(strip=True))
+        if price is None:
+            return None
+
+        old_price = None
+        old_price_el = price_block.select_one("span.senakaina")
+        if old_price_el is not None:
+            old_price = parse_price_text(old_price_el.get_text(strip=True))
+
+        # Scoped to div.product-info specifically: there's a second,
+        # unrelated div.kiekis elsewhere on the page (the cart quantity
+        # selector widget) that would otherwise be matched instead.
+        in_stock = None
+        qty_el = soup.select_one("div.product-info div.kiekis span.val")
+        if qty_el is not None:
+            qty_text = qty_el.get_text(strip=True)
+            if qty_text.isdigit():
+                in_stock = int(qty_text) > 0
+
+        return ProductDeal(
+            title=title_el.get_text(strip=True),
+            url=page_url,
+            price=price,
+            in_stock=in_stock,
+            old_price=old_price,
+        )
+
 
 if __name__ == "__main__":
     import json

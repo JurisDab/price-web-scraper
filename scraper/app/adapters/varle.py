@@ -6,7 +6,7 @@ from bs4.element import Tag
 
 from app.adapters.base import SiteAdapter
 from app.models import ProductDeal
-from app.pricing import parse_discount_pct
+from app.pricing import parse_discount_pct, parse_price_text
 
 
 class VarleAdapter(SiteAdapter):
@@ -61,7 +61,9 @@ class VarleAdapter(SiteAdapter):
         )
 
     @staticmethod
-    def _read_price(price_el: Tag) -> Decimal | None:
+    def _read_price(price_el: Tag | None) -> Decimal | None:
+        if price_el is None:
+            return None
         content = price_el.get("content")
         if not content:
             return None
@@ -69,6 +71,59 @@ class VarleAdapter(SiteAdapter):
             return Decimal(content)
         except InvalidOperation:
             return None
+
+    def parse_product(self, html: str, page_url: str) -> ProductDeal | None:
+        """Parses a single product's own detail page (not a listing card).
+        Unlike the listing grid, the detail page's schema.org Offer block
+        carries currency and stock status too, and its discount-line
+        (unlike the listing's) isn't commented out, so the old price is
+        available here.
+        """
+        soup = BeautifulSoup(html, "lxml")
+
+        title_el = soup.select_one('h1.title[itemprop="name"]')
+        pricing = soup.select_one("div.PRODUCT_PRICING")
+        if title_el is None or pricing is None:
+            return None
+
+        offer = pricing.select_one('[itemprop="offers"]')
+        if offer is None:
+            return None
+
+        price = self._read_price(offer.select_one('meta[itemprop="price"]'))
+        if price is None:
+            return None
+
+        currency = "EUR"
+        currency_el = offer.select_one('meta[itemprop="priceCurrency"]')
+        if currency_el is not None and currency_el.get("content"):
+            currency = currency_el["content"]
+
+        in_stock = None
+        availability_el = offer.select_one('link[itemprop="availability"]')
+        if availability_el is not None:
+            in_stock = "InStock" in (availability_el.get("href") or "")
+
+        old_price = None
+        discount_pct = None
+        discount_el = pricing.select_one("div.discount-line")
+        if discount_el is not None:
+            previous_price_el = discount_el.select_one("span.previous-price")
+            if previous_price_el is not None:
+                old_price = parse_price_text(previous_price_el.get_text(strip=True))
+            pct_el = discount_el.select_one("span.discount")
+            if pct_el is not None:
+                discount_pct = parse_discount_pct(pct_el.get_text(strip=True))
+
+        return ProductDeal(
+            title=title_el.get_text(strip=True),
+            url=page_url,
+            price=price,
+            currency=currency,
+            in_stock=in_stock,
+            old_price=old_price,
+            discount_pct=discount_pct,
+        )
 
 
 if __name__ == "__main__":

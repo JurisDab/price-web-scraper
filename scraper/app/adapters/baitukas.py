@@ -63,6 +63,42 @@ class BaitukasAdapter(SiteAdapter):
             image_url=image_url,
         )
 
+    def parse_product(self, html: str, page_url: str) -> ProductDeal | None:
+        """Parses a single product's own detail page — different markup
+        from the listing table (`div.price-new-live` instead of
+        `span.price-new-1`), and this page exposes real stock status via
+        `#stock_color`'s background color, which the listing doesn't.
+        """
+        soup = BeautifulSoup(html, "lxml")
+
+        title_el = soup.select_one("h1")
+        price_el = soup.select_one("div.price-new-live")
+        if title_el is None or price_el is None:
+            return None
+
+        price = parse_price_text(price_el.get_text(strip=True))
+        if price is None:
+            return None
+
+        old_price = None
+        old_price_el = soup.select_one("div.price-old-live")
+        if old_price_el is not None:
+            old_price = parse_price_text(old_price_el.get_text(strip=True))
+
+        in_stock = None
+        stock_el = soup.select_one("#stock_color")
+        if stock_el is not None:
+            in_stock = "40ce66" in (stock_el.get("style") or "").lower()
+
+        return ProductDeal(
+            title=title_el.get_text(strip=True),
+            url=page_url,
+            price=price,
+            in_stock=in_stock,
+            old_price=old_price,
+            discount_pct=compute_discount_pct(price, old_price),
+        )
+
 
 if __name__ == "__main__":
     import json

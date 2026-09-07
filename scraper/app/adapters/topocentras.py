@@ -1,6 +1,6 @@
 import json
 from decimal import Decimal
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from app.adapters.base import SiteAdapter
 from app.models import ProductDeal
@@ -26,6 +26,19 @@ def catalog_url(category_id: int, page_size: int = 40, current_page: int = 1) ->
         separators=(",", ":"),
     )
     return f"{BASE_URL}graphql?formVars={form_vars}&query=getCatalog&vars={variables}"
+
+
+def url_resolver_url(url_path: str) -> str:
+    """Resolves a normal page path (e.g. "/some-product.html") to its
+    entity type and numeric ID — the same lookup Topocentras' own frontend
+    does before rendering a page, found the same way as catalog_url()."""
+    variables = json.dumps({"urlKey": url_path}, separators=(",", ":"))
+    return f"{BASE_URL}graphql?query=urlResolver&vars={variables}"
+
+
+def product_detail_url(product_id: int) -> str:
+    variables = json.dumps({"id": str(product_id)}, separators=(",", ":"))
+    return f"{BASE_URL}graphql?query=ROOT_GetProduct&vars={variables}"
 
 
 class TopocentrasAdapter(SiteAdapter):
@@ -66,14 +79,40 @@ class TopocentrasAdapter(SiteAdapter):
         if image_path:
             image_url = urljoin(MEDIA_BASE, image_path)
 
+        in_stock = None
+        if item.get("stock_status"):
+            in_stock = item["stock_status"] == "IN_STOCK"
+
         return ProductDeal(
             title=item["name"],
             url=urljoin(BASE_URL, f"{url_key}.html"),
             price=price,
+            in_stock=in_stock,
             old_price=old_price,
             discount_pct=discount_pct,
             image_url=image_url,
         )
+
+    def scrape_product(self, url: str) -> ProductDeal | None:
+        """Overrides the base fetch-then-parse shape: this needs two
+        requests, not one — resolve the page path to a numeric product ID,
+        then fetch that product's data by ID. `url` is the normal
+        human-facing product page a user would actually paste in, unlike
+        catalog_url()'s listing endpoint.
+        """
+        url_path = urlparse(url).path
+        resolver_response = self.fetch(url_resolver_url(url_path))
+        resolved = json.loads(resolver_response).get("data", {}).get("urlResolver")
+        if not resolved or resolved.get("type") != "PRODUCT" or not resolved.get("id"):
+            return None
+
+        detail_response = self.fetch(product_detail_url(resolved["id"]))
+        data = json.loads(detail_response)
+        items = data.get("data", {}).get("productDetail", {}).get("items", [])
+        if not items:
+            return None
+
+        return self._parse_item(items[0])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@ class ProductDeal(BaseModel):
     title: str
     url: str
     price: Decimal
+    currency: str = "EUR"
+    in_stock: Optional[bool] = None
     old_price: Optional[Decimal] = None
     discount_pct: Optional[int] = None
     unit_info: Optional[str] = None
