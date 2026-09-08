@@ -12,12 +12,15 @@ import (
 
 	"pricetracker/internal/db"
 	"pricetracker/internal/product"
+	"pricetracker/internal/scheduler"
 	"pricetracker/internal/scrapeclient"
+	"pricetracker/internal/scrapeservice"
 	"pricetracker/internal/snapshot"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancelBackground := context.WithCancel(context.Background())
+	defer cancelBackground()
 
 	pool, err := db.NewPool(ctx)
 	if err != nil {
@@ -28,9 +31,13 @@ func main() {
 	products := product.NewRepository(pool)
 	snapshots := snapshot.NewRepository(pool)
 	scraper := scrapeclient.New()
+	scrapeSvc := scrapeservice.New(products, snapshots, scraper)
+
+	sched := scheduler.New(products, scrapeSvc)
+	go sched.Run(ctx)
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, products, snapshots, scraper)
+	registerRoutes(mux, products, snapshots, scrapeSvc)
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 
@@ -45,6 +52,8 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
 
+	cancelBackground() // stops the scheduler loop
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -52,11 +61,11 @@ func main() {
 	}
 }
 
-func registerRoutes(mux *http.ServeMux, products *product.Repository, snapshots *snapshot.Repository, scraper *scrapeclient.Client) {
+func registerRoutes(mux *http.ServeMux, products *product.Repository, snapshots *snapshot.Repository, scrapeSvc *scrapeservice.Service) {
 	mux.HandleFunc("POST /products", createProductHandler(products))
 	mux.HandleFunc("GET /products", listProductsHandler(products))
 	mux.HandleFunc("GET /products/{id}", getProductHandler(products, snapshots))
-	mux.HandleFunc("POST /products/{id}/scrape", scrapeProductHandler(products, snapshots, scraper))
+	mux.HandleFunc("POST /products/{id}/scrape", scrapeProductHandler(products, scrapeSvc))
 }
 
 func createProductHandler(products *product.Repository) http.HandlerFunc {
@@ -121,43 +130,19 @@ func getProductHandler(products *product.Repository, snapshots *snapshot.Reposit
 	}
 }
 
-func scrapeProductHandler(products *product.Repository, snapshots *snapshot.Repository, scraper *scrapeclient.Client) http.HandlerFunc {
+func scrapeProductHandler(products *product.Repository, scrapeSvc *scrapeservice.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 
-		p, err := products.Get(r.Context(), id)
-		if err != nil {
+		if _, err := products.Get(r.Context(), id); err != nil {
 			http.Error(w, "product not found", http.StatusNotFound)
 			return
 		}
 
-		scrapeCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-
-		result, err := scraper.Scrape(scrapeCtx, p.URL, p.SiteType)
+		s, err := scrapeSvc.ScrapeProduct(r.Context(), id)
 		if err != nil {
 			log.Printf("scrape failed for product %s: %v", id, err)
-			if markErr := products.MarkError(r.Context(), id, err.Error()); markErr != nil {
-				log.Printf("marking product error: %v", markErr)
-			}
 			http.Error(w, "scrape failed", http.StatusBadGateway)
-			return
-		}
-
-		s, err := snapshots.Create(r.Context(), id, result.Price, result.Currency, result.InStock)
-		if err != nil {
-			log.Printf("storing snapshot: %v", err)
-			http.Error(w, "failed to store scrape result", http.StatusInternalServerError)
-			return
-		}
-
-		var title *string
-		if result.Title != "" {
-			title = &result.Title
-		}
-		if err := products.UpdateAfterScrape(r.Context(), id, title, result.Price, result.Currency, result.InStock); err != nil {
-			log.Printf("updating product after scrape: %v", err)
-			http.Error(w, "failed to update product", http.StatusInternalServerError)
 			return
 		}
 
