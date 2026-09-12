@@ -91,6 +91,8 @@ terminal output.
   new snapshot, update the product's denormalized price/stock fields
 - `POST /scrape` (Python service, port 8000) — `{url, site_type}` →
   `{title, price, currency, in_stock}`. What the Go API's `scrapeclient` calls.
+- `GET /products/{id}/alerts` — alerts for one product
+- `GET /alerts` — alerts across all products, most recent first
 
 ## Scheduler
 
@@ -113,6 +115,35 @@ Postgres, started the server, and confirmed both went from untouched rows
 to `status: active` with real scraped prices within about a second of
 startup — no manual `/scrape` call involved.
 
+## Alert logic
+
+`api/internal/alert` compares each new scrape result against the
+product's previous state and fires threshold-based rules:
+
+- **price_drop** — new price is ≥5% below the previous price (a fixed
+  baseline for now — the planned LLM deal-score step replaces/augments
+  this with real judgment instead of an arbitrary %)
+- **all_time_low** — new price ≤ the lowest price ever recorded for that
+  product (one cheap `MIN(price)` query)
+- **back_in_stock** — was out of stock last scrape, is in stock now
+
+Detection is a pure function (`alert.Detect`, no DB access) wired into
+`scrapeservice.ScrapeProduct` right after a successful scrape — the
+"previous" price/stock come from the product's already-in-memory
+denormalized fields, no extra query needed for those two rules. On a
+product's first-ever scrape there's nothing to compare against, so no
+alerts fire — that falls out of nil-checks rather than needing special
+first-scrape handling. Alert-write failures are logged, not treated as
+scrape failures, so a broken alerts insert can't block price tracking
+from working.
+
+Verified live: scraped a real product once (baseline, correctly produced
+zero alerts), then manually set the product's stored price/stock to a
+higher price + out-of-stock in Postgres to simulate a stale previous
+state, then scraped again — all three rules fired correctly in one pass,
+including accurate math (e.g. "Price dropped 52% to €142.99 (was
+€300.00)").
+
 ## Adapters
 
 One adapter per site (`scraper/app/adapters/<site>.py`). Each does two
@@ -124,11 +155,52 @@ latter. The two aren't always the same page for a given site. Sites vary
 too much in markup to share a parser, so there's no attempt at a generic
 one.
 
+## Tests
+
+**Python** (`scraper/tests/`, pytest):
+
+```sh
+cd scraper
+.venv/Scripts/pip install -e .[test]
+.venv/Scripts/python -m pytest tests/
+```
+
+- `test_pricing.py` — plain unit tests (no network) for the price/discount
+  parsing helpers.
+- `test_varle.py`, `test_skytech.py`, `test_baitukas.py`,
+  `test_topocentras.py` — **integration tests against the real live
+  sites**, deliberately not saved HTML/JSON fixtures. A frozen snapshot
+  would keep passing after a site changes its markup, which defeats the
+  point of testing a scraper — these are slower and can fail for reasons
+  outside the code (site down, redesign), but that's treated as the more
+  honest signal for this kind of code. Each test scrapes the real listing
+  page, then feeds the **first real product URL it just found** into the
+  single-product scrape — nothing is hardcoded, so a test never breaks
+  just because some specific product sold out or got delisted.
+
+**Go** (`api/internal/*/`, standard `testing` package):
+
+```sh
+cd api
+go test ./...
+```
+
+- `alert/detect_test.go`, `scheduler/scheduler_test.go`,
+  `scrapeclient/client_test.go` — plain unit tests for pure logic (alert
+  rules, domain-grouping, HTTP request/response shape via a mocked
+  server). No network, no DB.
+- `product/repository_test.go`, `snapshot/repository_test.go`,
+  `alert/repository_test.go` — **integration tests via
+  [Testcontainers](https://testcontainers.com/)** (`internal/testdb`):
+  each test spins up a real, ephemeral Postgres container, applies the
+  actual files in `db/migrations/` (not a hand-maintained copy of the
+  schema), runs the repository code against it, and tears the container
+  down after — so these run identically on any machine with Docker,
+  local or CI, without needing a long-running dev database. Requires
+  Docker to be running.
+
 ## What's not yet implemented
 
-- **Alert logic** — threshold-based rules (`price_drop`, `all_time_low`,
-  `back_in_stock`) triggered from a new scrape result, persisted to the
-  `alerts` table. Planned as the next piece.
 - **LLM deal-score** — a follow-up to alert logic: instead of (or
   alongside) fixed thresholds, feed price history to a local LLM (Ollama)
   for a "genuine deal vs. noise" verdict. Needs Ollama running + prompt
@@ -136,9 +208,6 @@ one.
   are working.
 - **React dashboard** — product list, add-product form, price history
   chart, alerts view. Not started.
-- **Automated test suite** — currently the only way to check an adapter
-  or the API is running it manually against the live site/DB. No pytest
-  suite (with saved HTML/JSON fixtures) or Go tests exist yet.
 - **docker-compose for the full stack** — currently only runs Postgres;
   doesn't yet build/run the Go API, the Python service, or (once it
   exists) the dashboard together.
