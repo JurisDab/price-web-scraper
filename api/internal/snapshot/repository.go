@@ -47,3 +47,13 @@ func (r *Repository) ListByProduct(ctx context.Context, productID string, limit 
 	}
 	return snapshots, rows.Err()
 }
+
+// MinPrice returns the lowest price ever recorded for a product, or nil if
+// it has no snapshots yet (a nil result, not an error, so callers can treat
+// "no history" as just another case rather than something to handle
+// specially).
+func (r *Repository) MinPrice(ctx context.Context, productID string) (*float64, error) {
+	var min *float64
+	err := r.pool.QueryRow(ctx, `SELECT MIN(price) FROM price_snapshots WHERE product_id = $1`, productID).Scan(&min)
+	return min, err
+}

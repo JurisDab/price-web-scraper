@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"pricetracker/internal/alert"
 	"pricetracker/internal/db"
 	"pricetracker/internal/product"
 	"pricetracker/internal/scheduler"
@@ -30,14 +31,15 @@ func main() {
 
 	products := product.NewRepository(pool)
 	snapshots := snapshot.NewRepository(pool)
+	alerts := alert.NewRepository(pool)
 	scraper := scrapeclient.New()
-	scrapeSvc := scrapeservice.New(products, snapshots, scraper)
+	scrapeSvc := scrapeservice.New(products, snapshots, alerts, scraper)
 
 	sched := scheduler.New(products, scrapeSvc)
 	go sched.Run(ctx)
 
 	mux := http.NewServeMux()
-	registerRoutes(mux, products, snapshots, scrapeSvc)
+	registerRoutes(mux, products, snapshots, alerts, scrapeSvc)
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
 
@@ -61,11 +63,13 @@ func main() {
 	}
 }
 
-func registerRoutes(mux *http.ServeMux, products *product.Repository, snapshots *snapshot.Repository, scrapeSvc *scrapeservice.Service) {
+func registerRoutes(mux *http.ServeMux, products *product.Repository, snapshots *snapshot.Repository, alerts *alert.Repository, scrapeSvc *scrapeservice.Service) {
 	mux.HandleFunc("POST /products", createProductHandler(products))
 	mux.HandleFunc("GET /products", listProductsHandler(products))
-	mux.HandleFunc("GET /products/{id}", getProductHandler(products, snapshots))
+	mux.HandleFunc("GET /products/{id}", getProductHandler(products, snapshots, alerts))
 	mux.HandleFunc("POST /products/{id}/scrape", scrapeProductHandler(products, scrapeSvc))
+	mux.HandleFunc("GET /products/{id}/alerts", listProductAlertsHandler(products, alerts))
+	mux.HandleFunc("GET /alerts", listAlertsHandler(alerts))
 }
 
 func createProductHandler(products *product.Repository) http.HandlerFunc {
@@ -106,7 +110,7 @@ func listProductsHandler(products *product.Repository) http.HandlerFunc {
 	}
 }
 
-func getProductHandler(products *product.Repository, snapshots *snapshot.Repository) http.HandlerFunc {
+func getProductHandler(products *product.Repository, snapshots *snapshot.Repository, alerts *alert.Repository) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 
@@ -123,10 +127,49 @@ func getProductHandler(products *product.Repository, snapshots *snapshot.Reposit
 			return
 		}
 
+		productAlerts, err := alerts.ListByProduct(r.Context(), id, 50)
+		if err != nil {
+			log.Printf("listing alerts: %v", err)
+			http.Error(w, "failed to load alerts", http.StatusInternalServerError)
+			return
+		}
+
 		writeJSON(w, http.StatusOK, struct {
 			product.Product
 			PriceHistory []snapshot.Snapshot `json:"price_history"`
-		}{p, history})
+			Alerts       []alert.Alert       `json:"alerts"`
+		}{p, history, productAlerts})
+	}
+}
+
+func listProductAlertsHandler(products *product.Repository, alerts *alert.Repository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+
+		if _, err := products.Get(r.Context(), id); err != nil {
+			http.Error(w, "product not found", http.StatusNotFound)
+			return
+		}
+
+		list, err := alerts.ListByProduct(r.Context(), id, 100)
+		if err != nil {
+			log.Printf("listing alerts for product %s: %v", id, err)
+			http.Error(w, "failed to list alerts", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+	}
+}
+
+func listAlertsHandler(alerts *alert.Repository) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		list, err := alerts.List(r.Context(), 100)
+		if err != nil {
+			log.Printf("listing alerts: %v", err)
+			http.Error(w, "failed to list alerts", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
 	}
 }
 

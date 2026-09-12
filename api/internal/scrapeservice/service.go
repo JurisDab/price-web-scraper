@@ -1,13 +1,11 @@
-// Package scrapeservice holds the "scrape one product" logic shared by the
-// manual POST /products/{id}/scrape endpoint and the scheduler's periodic
-// sweep, so there's one code path for it rather than two copies drifting
-// apart.
 package scrapeservice
 
 import (
 	"context"
+	"log"
 	"time"
 
+	"pricetracker/internal/alert"
 	"pricetracker/internal/product"
 	"pricetracker/internal/scrapeclient"
 	"pricetracker/internal/snapshot"
@@ -16,18 +14,14 @@ import (
 type Service struct {
 	products  *product.Repository
 	snapshots *snapshot.Repository
+	alerts    *alert.Repository
 	scraper   *scrapeclient.Client
 }
 
-func New(products *product.Repository, snapshots *snapshot.Repository, scraper *scrapeclient.Client) *Service {
-	return &Service{products: products, snapshots: snapshots, scraper: scraper}
+func New(products *product.Repository, snapshots *snapshot.Repository, alerts *alert.Repository, scraper *scrapeclient.Client) *Service {
+	return &Service{products: products, snapshots: snapshots, alerts: alerts, scraper: scraper}
 }
 
-// ScrapeProduct fetches the product's current price/stock via the Python
-// scraper service, stores the result as a new snapshot, and updates the
-// product's denormalized fields. On scrape failure, the product is marked
-// status=error with the failure recorded in last_error rather than left
-// stale with no explanation.
 func (s *Service) ScrapeProduct(ctx context.Context, id string) (snapshot.Snapshot, error) {
 	p, err := s.products.Get(ctx, id)
 	if err != nil {
@@ -43,6 +37,17 @@ func (s *Service) ScrapeProduct(ctx context.Context, id string) (snapshot.Snapsh
 			return snapshot.Snapshot{}, markErr
 		}
 		return snapshot.Snapshot{}, err
+	}
+
+	minPriceEver, err := s.snapshots.MinPrice(ctx, id)
+	if err != nil {
+		return snapshot.Snapshot{}, err
+	}
+
+	for _, c := range alert.Detect(p.CurrentPrice, p.InStock, result.Price, result.InStock, minPriceEver) {
+		if _, err := s.alerts.Create(ctx, id, c.Type, c.Message, c.Price); err != nil {
+			log.Printf("scrapeservice: creating %s alert for product %s: %v", c.Type, id, err)
+		}
 	}
 
 	snap, err := s.snapshots.Create(ctx, id, result.Price, result.Currency, result.InStock)
